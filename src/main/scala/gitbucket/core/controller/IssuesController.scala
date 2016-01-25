@@ -12,7 +12,7 @@ import gitbucket.core.view
 import gitbucket.core.view.Markdown
 
 import io.github.gitbucket.scalatra.forms._
-import org.scalatra.Ok
+import org.scalatra.{Created, Ok}
 
 
 class IssuesController extends IssuesControllerBase
@@ -79,6 +79,22 @@ trait IssuesControllerBase extends ControllerBase {
   })
 
   /**
+    * Get a single issue
+    * https://developer.github.com/v3/issues/#get-a-single-issue
+    */
+  get("/api/v3/repos/:owner/:repository/issues/:id")(referrersOnly { repository =>
+    (for{
+      issueId <- params("id").toIntOpt
+      issue <- getIssue(repository.owner, repository.name, issueId.toString)
+      account <- getAccountByUserName(repository.owner)
+    } yield {
+      val issueLabels = getIssueLabels(repository.owner, repository.name, issueId).map { issueLabel =>
+        ApiLabel(issueLabel, RepositoryName(repository)) }
+      JsonFormat(ApiIssue(issue, RepositoryName(repository), ApiUser(account), issueLabels))
+    }) getOrElse NotFound
+  })
+
+  /**
    * https://developer.github.com/v3/issues/comments/#list-comments-on-an-issue
    */
   get("/api/v3/repos/:owner/:repository/issues/:id/comments")(referrersOnly { repository =>
@@ -141,6 +157,70 @@ trait IssuesControllerBase extends ControllerBase {
 
       redirect(s"/${owner}/${name}/issues/${issueId}")
     }
+  })
+
+  /**
+    * https://developer.github.com/v3/issues/#create-an-issue
+    */
+  post("/api/v3/repos/:owner/:repository/issues")(readableUsersOnly { repository =>
+    (for{
+      data <- extractFromJsonBody[CreateAnIssue] if data.isValid
+    } yield {
+      val writable = hasWritePermission(repository.owner, repository.name, context.loginAccount)
+      val userName = context.loginAccount.get.userName
+      val owner = repository.owner
+      val name = repository.name
+      var issueLabels: List[ApiLabel] = Nil
+
+      // insert issue
+      val issueId = createIssue(owner, name, userName, data.title, data.body,
+        if (writable) data.assignee else None,
+        if (writable) data.milestone else None)
+
+      // insert labels
+      if (writable) {
+        (data.labels match {
+          case _: String => List[String](data.labels.asInstanceOf[String])
+          case List(_: String, _*) => data.labels.asInstanceOf[List[String]]
+          case _ => List[String]()
+        }).map { labelName =>
+          val labels = getLabels(owner, name)
+          labels.find(_.labelName == labelName).map { label =>
+            registerIssueLabel(owner, name, issueId, label.labelId)
+          } getOrElse {
+            // In GitHub, new labels are created without specifying a color,
+            // it will be `"color": "ededed"`. "ededed" color is #333333 now.
+            val labelId = createLabel(owner, name, labelName, "333333")
+            registerIssueLabel(owner, name, issueId, labelId)
+          }
+        }
+        issueLabels = getIssueLabels(owner, name, issueId).map { issueLabel =>
+          ApiLabel(issueLabel, RepositoryName(repository))
+        }
+      }
+
+      // record activity
+      recordCreateIssueActivity(owner, name, userName, issueId, data.title)
+
+      getIssue(owner, name, issueId.toString).foreach { issue =>
+        // extract references and create refer comment
+        createReferComment(owner, name, issue, data.title + " " + data.body.getOrElse(""))
+
+        // call web hooks
+        callIssuesWebHook("opened", repository, issue, context.baseUrl, context.loginAccount.get)
+
+        // notifications
+        Notifier().toNotify(repository, issue, data.body.getOrElse("")){
+          Notifier.msgIssue(s"${context.baseUrl}/${owner}/${name}/issues/${issueId}")
+        }
+      }
+
+      Created(JsonFormat(ApiIssue(
+        getIssue(owner, name, issueId.toString).get,
+        RepositoryName(repository),
+        ApiUser(context.loginAccount.get),
+        issueLabels)))
+    }) getOrElse NotFound()
   })
 
   ajaxPost("/:owner/:repository/issues/edit_title/:id", issueTitleEditForm)(readableUsersOnly { (title, repository) =>
