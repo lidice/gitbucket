@@ -160,66 +160,70 @@ trait IssuesControllerBase extends ControllerBase {
   })
 
   /**
+    * Create an issue
     * https://developer.github.com/v3/issues/#create-an-issue
     */
   post("/api/v3/repos/:owner/:repository/issues")(readableUsersOnly { repository =>
     (for{
       data <- extractFromJsonBody[CreateAnIssue] if data.isValid
     } yield {
-      val writable = hasWritePermission(repository.owner, repository.name, context.loginAccount)
-      val userName = context.loginAccount.get.userName
-      val owner = repository.owner
-      val name = repository.name
-      var issueLabels: List[ApiLabel] = Nil
+      LockUtil.lock(RepositoryName(repository).fullName) {
+        val writable = hasWritePermission(repository.owner, repository.name, context.loginAccount)
+        val userName = context.loginAccount.get.userName
+        val owner = repository.owner
+        val name = repository.name
+        var issueLabels: List[ApiLabel] = Nil
 
-      // insert issue
-      val issueId = createIssue(owner, name, userName, data.title, data.body,
-        if (writable) data.assignee else None,
-        if (writable) data.milestone else None)
+        // insert issue
+        val issueId = createIssue(owner, name, userName, data.title, data.body,
+          if (writable) data.assignee else None,
+          if (writable) data.milestone else None)
 
-      // insert labels
-      if (writable) {
-        (data.labels match {
-          case _: String => List[String](data.labels.asInstanceOf[String])
-          case List(_: String, _*) => data.labels.asInstanceOf[List[String]]
-          case _ => List[String]()
-        }).map { labelName =>
-          val labels = getLabels(owner, name)
-          labels.find(_.labelName == labelName).map { label =>
-            registerIssueLabel(owner, name, issueId, label.labelId)
-          } getOrElse {
-            // In GitHub, new labels are created without specifying a color,
-            // it will be `"color": "ededed"`. "ededed" color is #333333 now.
-            val labelId = createLabel(owner, name, labelName, "333333")
-            registerIssueLabel(owner, name, issueId, labelId)
+        // insert labels
+        if (writable) {
+          (data.labels match {
+            case _: String => List[String](data.labels.asInstanceOf[String])
+            case List(_: String, _*) => data.labels.asInstanceOf[List[String]]
+            case _ => List[String]()
+          }).distinct.map { labelName =>
+            val labels = getLabels(owner, name)
+            labels.find(_.labelName == labelName).map { label =>
+              registerIssueLabel(owner, name, issueId, label.labelId)
+            } getOrElse {
+              // In GitHub, new labels are created without specifying a color, it will be `"color": "ededed" now.
+              // But current GitBucket's default is #888888.
+              val labelId = createLabel(owner, name, labelName, "888888")
+              registerIssueLabel(owner, name, issueId, labelId)
+            }
+          }
+          issueLabels = getIssueLabels(owner, name, issueId).map { issueLabel =>
+            ApiLabel(issueLabel, RepositoryName(repository))
           }
         }
-        issueLabels = getIssueLabels(owner, name, issueId).map { issueLabel =>
-          ApiLabel(issueLabel, RepositoryName(repository))
+
+        // record activity
+        recordCreateIssueActivity(owner, name, userName, issueId, data.title)
+
+        val issueOpt = getIssue(owner, name, issueId.toString)
+        issueOpt.foreach { issue =>
+          // extract references and create refer comment
+          createReferComment(owner, name, issue, data.title + " " + data.body.getOrElse(""))
+
+          // call web hooks
+          callIssuesWebHook("opened", repository, issue, context.baseUrl, context.loginAccount.get)
+
+          // notifications
+          Notifier().toNotify(repository, issue, data.body.getOrElse("")){
+            Notifier.msgIssue(s"${context.baseUrl}/${owner}/${name}/issues/${issueId}")
+          }
         }
+
+        Created(JsonFormat(ApiIssue(
+          issueOpt.get,
+          RepositoryName(repository),
+          ApiUser(context.loginAccount.get),
+          issueLabels)))
       }
-
-      // record activity
-      recordCreateIssueActivity(owner, name, userName, issueId, data.title)
-
-      getIssue(owner, name, issueId.toString).foreach { issue =>
-        // extract references and create refer comment
-        createReferComment(owner, name, issue, data.title + " " + data.body.getOrElse(""))
-
-        // call web hooks
-        callIssuesWebHook("opened", repository, issue, context.baseUrl, context.loginAccount.get)
-
-        // notifications
-        Notifier().toNotify(repository, issue, data.body.getOrElse("")){
-          Notifier.msgIssue(s"${context.baseUrl}/${owner}/${name}/issues/${issueId}")
-        }
-      }
-
-      Created(JsonFormat(ApiIssue(
-        getIssue(owner, name, issueId.toString).get,
-        RepositoryName(repository),
-        ApiUser(context.loginAccount.get),
-        issueLabels)))
     }) getOrElse NotFound()
   })
 
