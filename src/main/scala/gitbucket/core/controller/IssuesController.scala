@@ -278,20 +278,28 @@ trait IssuesControllerBase extends ControllerBase {
             if (data.state.isDefined) updateClosed(owner, name, issueId, data.state.get.matches("closed"))
 
             // update milestone
-            if (data.milestone.isDefined) updateMilestoneId(owner, name, issueId, data.milestone)
+            println(data.milestone)
+            if (writable) {
+              if (data.milestone.isEmpty) {
+                if (issue.milestoneId.nonEmpty) deleteMilestone(owner, name, issue.milestoneId.get)
+              } else {
+                updateMilestoneId(owner, name, issueId, data.milestone)
+              }
+            }
 
             // update labels
             // Send an empty array ([]) to clear all Labels from the Issue.
             // https://developer.github.com/v3/issues/#parameters-3
             if (data.labels.isDefined) {
+              val dataLabels = data.labels.get distinct
               val currentIssueLabelNames = getIssueLabels(owner, name, issueId).map { issueLabel =>
                 getLabel(owner, name, issueLabel.labelId).get.labelName
               }
               deleteIssueLabels(owner, name, issueId,
-                if (data.labels.isEmpty) currentIssueLabelNames else currentIssueLabelNames diff data.labels.get)
+                if (data.labels.isEmpty) currentIssueLabelNames else currentIssueLabelNames diff dataLabels)
               if (writable) {
                 createAndRegisterIssueLabels(owner, name, issueId,
-                  if (data.labels.isEmpty) Nil else data.labels.get diff currentIssueLabelNames)
+                  if (data.labels.isEmpty) Nil else dataLabels diff currentIssueLabelNames)
                 issueLabels = getIssueLabels(owner, name, issueId).map { issueLabel =>
                   ApiLabel(issueLabel, RepositoryName(repository))
                 }
@@ -640,8 +648,8 @@ trait IssuesControllerBase extends ControllerBase {
   }
 
   private def createAndRegisterIssueLabels(owner: String, repository: String, issueId: Int, issueLabels: List[String]) = {
+    val labels = getLabels(owner, repository)
     issueLabels.distinct.map { labelName =>
-      val labels = getLabels(owner, repository)
       labels.find(_.labelName == labelName).map { label =>
         registerIssueLabel(owner, repository, issueId, label.labelId)
       } getOrElse {
