@@ -181,21 +181,7 @@ trait IssuesControllerBase extends ControllerBase {
 
         // insert labels
         if (writable) {
-          (data.labels match {
-            case _: String => List[String](data.labels.asInstanceOf[String])
-            case List(_: String, _*) => data.labels.asInstanceOf[List[String]]
-            case _ => List[String]()
-          }).distinct.map { labelName =>
-            val labels = getLabels(owner, name)
-            labels.find(_.labelName == labelName).map { label =>
-              registerIssueLabel(owner, name, issueId, label.labelId)
-            } getOrElse {
-              // In GitHub, new labels are created without specifying a color, it will be `"color": "ededed" now.
-              // But current GitBucket's default is #888888.
-              val labelId = createLabel(owner, name, labelName, "888888")
-              registerIssueLabel(owner, name, issueId, labelId)
-            }
-          }
+          createAndRegisterIssueLabels(owner, name, issueId, data.labels.getOrElse(Nil))
           issueLabels = getIssueLabels(owner, name, issueId).map { issueLabel =>
             ApiLabel(issueLabel, RepositoryName(repository))
           }
@@ -255,6 +241,73 @@ trait IssuesControllerBase extends ControllerBase {
         } else Unauthorized
       } getOrElse NotFound
     }
+  })
+
+  /**
+    * Edit an issue
+    * https://developer.github.com/v3/issues/#edit-an-issue
+    */
+  patch("/api/v3/repos/:owner/:repository/issues/:id")(readableUsersOnly { repository =>
+    (for{
+      data <- extractFromJsonBody[CreateAnIssue] if data.isValidChange
+    } yield {
+      LockUtil.lock(RepositoryName(repository).fullName) {
+        val owner = repository.owner
+        val name = repository.name
+        val issueIdStr = params("id")
+        val issueId = issueIdStr.toInt
+        var issueLabels: List[ApiLabel] = Nil
+
+        val issueOpt = getIssue(owner, name, issueIdStr).map { issue =>
+          val writable = hasWritePermission(repository.owner, repository.name, context.loginAccount)
+          if (isEditable(owner, name, issue.openedUserName)) {
+            // update issue
+            updateIssue(owner, name, issue.issueId,
+              if (data.title.nonEmpty) data.title else issue.title,
+              if (data.body.nonEmpty) data.body else issue.content)
+
+            // extract references and create refer comment
+            createReferComment(repository.owner, repository.name, issue, data.body.getOrElse(""))
+
+            // update assignee
+            if (data.assignee.isDefined && getAccountByUserName(data.assignee.get).get.isGroupAccount) {
+              updateAssignedUserName(owner, name, issueId, data.assignee)
+            }
+
+            // update state
+            if (data.state.isDefined) updateClosed(owner, name, issueId, data.state.get.matches("closed"))
+
+            // update milestone
+            if (data.milestone.isDefined) updateMilestoneId(owner, name, issueId, data.milestone)
+
+            // update labels
+            // Send an empty array ([]) to clear all Labels from the Issue.
+            // https://developer.github.com/v3/issues/#parameters-3
+            if (data.labels.isDefined) {
+              val currentIssueLabelNames = getIssueLabels(owner, name, issueId).map { issueLabel =>
+                getLabel(owner, name, issueLabel.labelId).get.labelName
+              }
+              deleteIssueLabels(owner, name, issueId,
+                if (data.labels.isEmpty) currentIssueLabelNames else currentIssueLabelNames diff data.labels.get)
+              if (writable) {
+                createAndRegisterIssueLabels(owner, name, issueId,
+                  if (data.labels.isEmpty) Nil else data.labels.get diff currentIssueLabelNames)
+                issueLabels = getIssueLabels(owner, name, issueId).map { issueLabel =>
+                  ApiLabel(issueLabel, RepositoryName(repository))
+                }
+              }
+            }
+          }
+          issue
+        }
+
+        JsonFormat(ApiIssue(
+          issueOpt.get,
+          RepositoryName(repository),
+          ApiUser(context.loginAccount.get),
+          issueLabels))
+      }
+    }) getOrElse NotFound()
   })
 
   post("/:owner/:repository/issue_comments/new", commentForm)(readableUsersOnly { (form, repository) =>
@@ -583,6 +636,29 @@ trait IssuesControllerBase extends ControllerBase {
           condition,
           repository,
           hasWritePermission(owner, repoName, context.loginAccount))
+    }
+  }
+
+  private def createAndRegisterIssueLabels(owner: String, repository: String, issueId: Int, issueLabels: List[String]) = {
+    issueLabels.distinct.map { labelName =>
+      val labels = getLabels(owner, repository)
+      labels.find(_.labelName == labelName).map { label =>
+        registerIssueLabel(owner, repository, issueId, label.labelId)
+      } getOrElse {
+        // In GitHub, new labels are created without specifying a color, it will be `"color": "ededed" now.
+        // But current GitBucket's default is #888888.
+        val labelId = createLabel(owner, repository, labelName, "888888")
+        registerIssueLabel(owner, repository, issueId, labelId)
+      }
+    }
+  }
+
+  private def deleteIssueLabels(owner: String, repository: String, issueId: Int, issueLabels: List[String]) = {
+    issueLabels.distinct.map { labelName =>
+      val labels = getLabels(owner, repository)
+      labels.find(_.labelName == labelName).map { label =>
+        deleteIssueLabel(owner, repository, issueId, label.labelId)
+      }
     }
   }
 }

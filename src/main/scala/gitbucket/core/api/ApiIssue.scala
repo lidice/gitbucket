@@ -25,7 +25,7 @@ case class ApiIssue(
 }
 
 object ApiIssue{
-  def apply(issue: Issue, repositoryName: RepositoryName, user: ApiUser, labels: List[ApiLabel] = List()): ApiIssue =
+  def apply(issue: Issue, repositoryName: RepositoryName, user: ApiUser, labels: List[ApiLabel] = Nil): ApiIssue =
     ApiIssue(
       number = issue.issueId,
       title  = issue.title,

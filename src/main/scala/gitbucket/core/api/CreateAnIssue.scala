@@ -8,10 +8,15 @@ case class CreateAnIssue (
     title: String,
     body: Option[String],
     assignee: Option[String],
+    state: Option[String],
     milestone: Option[Int],
-    labels: Any
+    labels: Option[List[String]]
 ){
   def isValid: Boolean = {
     title.nonEmpty
+  }
+  def isValidChange: Boolean = {
+    title.nonEmpty &&
+      (state.isEmpty || state.get.matches("[open|closed]"))
   }
 }
