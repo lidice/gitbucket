@@ -258,7 +258,7 @@ trait IssuesControllerBase extends ControllerBase {
         val issueId = issueIdStr.toInt
         var issueLabels: List[ApiLabel] = Nil
 
-        val issueOpt = getIssue(owner, name, issueIdStr).map { issue =>
+        getIssue(owner, name, issueIdStr).foreach { issue =>
           val writable = hasWritePermission(repository.owner, repository.name, context.loginAccount)
           if (isEditable(owner, name, issue.openedUserName)) {
             // update issue
@@ -278,7 +278,6 @@ trait IssuesControllerBase extends ControllerBase {
             if (data.state.isDefined) updateClosed(owner, name, issueId, data.state.get.matches("closed"))
 
             // update milestone
-            println(data.milestone)
             if (writable) {
               if (data.milestone.isEmpty) {
                 if (issue.milestoneId.nonEmpty) deleteMilestone(owner, name, issue.milestoneId.get)
@@ -305,6 +304,13 @@ trait IssuesControllerBase extends ControllerBase {
                 }
               }
             }
+          }
+        }
+
+        val issueOpt = getIssue(owner, name, issueIdStr).map { issue =>
+          if (isEditable(owner, name, issue.openedUserName)) {
+            // extract references and create refer comment
+            createReferComment(repository.owner, repository.name, issue, data.body.getOrElse(""))
           }
           issue
         }
